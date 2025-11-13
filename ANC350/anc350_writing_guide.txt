@@ -1,0 +1,324 @@
+好的，非常清晰的需求。
+
+[cite_start]根据您提供的《Python 仪器自动化控制项目行动指南》[cite: 2669] [cite_start]和 `anc350res_8h.html` (DLL API 文档)，并结合 `ANC350` 的用户手册 [cite: 1497]，我们可以制定一个清晰的、分步骤的编程任务。
+
+[cite_start]您的目标是编写一个Python程序，它能可靠地控制ANC350位移台。我们将严格遵循《指南》中的“数字孪生”（面向对象封装）思想 [cite: 2708][cite_start]，但使用 `anc350res_8h.html` 中定义的具体DLL函数，而不是《指南》中示例的PyVISA/SCPI [cite: 2694]。
+
+以下是您的Python代码需要完成的任务步骤分析：
+
+---
+
+### 零、 运行环境准备 (代码运行的前提)
+
+在编写Python代码之前，您必须确保目标计算机（即连接ANC350的电脑）满足两个条件：
+
+1.  [cite_start]**硬件驱动已安装**：ANC350的底层USB驱动（或以太网驱动）必须已安装，确保Windows设备管理器能看到该设备 [cite: 600, 2744]。
+2.  **DLL文件可用**：您必须拥有 `anc350v4.dll` 文件，并将其放在Python脚本可以访问的路径下（例如，与您的Python主脚本放在同一个文件夹中）。
+
+### 第一步：初始化、发现与连接 (程序的启动)
+
+这是程序的起点，目标是让Python与 `anc350v4.dll` 对话，并获取对硬件的控制“句柄”(Handle)。
+
+1.  **加载DLL**：程序需要使用Python的 `ctypes` 库来加载 `anc350v4.dll` 文件。
+2.  **定义函数原型 (关键)**：您必须告诉 `ctypes` 库，`anc350res_8h.html` 中每一个您想用的C函数，它们的**参数类型** (`.argtypes`) 和**返回类型** (`.restype`) 是什么。
+    * *例如*：对于 `ANC_discover`，您需要告诉Python它需要一个`ANC_InterfaceType` (整型) 和一个指向 `Uit32` (无符号整型指针) 的参数，并且它返回一个 `Int32` (整型)。
+3.  **发现设备**：调用 `ANC_discover` 函数，询问DLL在所有接口（USB、TCP等）上共发现了多少台ANC350设备。
+4.  **连接设备**：程序将选择一台已发现的设备（例如，第0台），并调用 `ANC_connect` 函数。
+5.  **获取句柄**：如果连接成功，`ANC_connect` 会返回一个 `ANC_Handle` (设备句柄)。这个句柄是后续所有控制命令的“通行证”，必须被安全地存储起来。
+
+> [cite_start]**对应《指南》**：这一整套流程应该被封装在您要创建的 `ANC350Controller` 类的构造函数 (`__init__`) 中 [cite: 2714]，实现自动连接。
+
+### 第二步：配置轴参数 (运动前的准备)
+
+连接成功后，不能立即移动。您必须先配置位移台的运动参数，告诉它“如何移动”。
+
+1.  [cite_start]**使能轴输出 (安全开关)**：这是**最关键**的一步。默认情况下，轴的高压输出是关闭的 [cite: 1027, 1029]。您必须调用 `ANC_setAxisOutput` 函数，将 `enable` 参数设为 `True` (或 1)。
+2.  [cite_start]**选择执行器**：(如果需要) 您可能需要调用 `ANC_selectActuator` 来告诉控制器该轴连接的具体位移台型号（例如手册中提到的 ANPx101res [cite: 1088]），以加载正确的运动参数。
+3.  **设置运动模式参数**：根据您的需求选择一种模式并设置其参数：
+    * **开环步进 (Stepping)**：设置 `ANC_setAmplitude` (电压) 和 `ANC_setFrequency` (频率)。
+    * [cite_start]**闭环扫描 (Auto-Move)**：设置 `ANC_setTargetPosition` (目标位置)。您可能还想设置 `ANC_setTargetRange` (目标范围)，它定义了“到达目标”的精度范围 [cite: 1227]。
+
+> [cite_start]**对应《指南》**：这些配置步骤应该被封装为 `ANC350Controller` 类中清晰的方法，例如 `setup_axis(axis, voltage, freq)` 或 `set_target(axis, position)` [cite: 2711]。
+
+### 第三步：执行运动 (发起动作)
+
+配置完成后，您可以命令位移台开始移动。API提供了几种不同的运动方式。
+
+1.  [cite_start]**单步移动**：调用 `ANC_startSingleStep`。这在GUI中对应“单击步进”按钮 [cite: 996, 1867]。
+2.  [cite_start]**连续移动**：调用 `ANC_startContinousMove`。这对应“按住不放的连续移动” [cite: 997, 1867]。
+3.  [cite_start]**自动逼近 (用于扫描)**：调用 `ANC_startAutoMove`。这是执行自动化扫描的核心命令。它告诉位移台：“开始移动，直到你到达在第二步中设置的那个目标位置为止。” [cite: 2092]。
+
+> [cite_start]**对应《指南》**：在《指南》的核心扫描循环 [cite: 2731] 中，您将主要使用 `ANC_setTargetPosition` (第二步) 和 `ANC_startAutoMove` (第三步) 的组合。
+
+### 第四步：状态轮询与反馈 (等待与确认)
+
+这是一个至关重要的步骤，尤其是在自动化扫描中。调用 `ANC_startAutoMove` 后，程序**必须等待**位移台完成移动，才能进行下一步（例如：采集光谱数据）。
+
+1.  **创建等待循环**：程序需要进入一个循环，反复向控制器查询状态。
+2.  **查询状态**：在循环中，调用 `ANC_getAxisStatus` 函数。
+3.  **检查标志位**：`ANC_getAxisStatus` 会返回多个布尔值。您需要检查 `moving` 标志位。
+    * 如果 `moving` 为 `True` (或 1)，说明位移台还在移动，循环继续。
+    * 如果 `moving` 为 `False` (或 0)，说明移动已停止。
+4.  [cite_start]**(可选) 获取位置**：在循环中或循环结束后，您可以调用 `ANC_getPosition` 来获取并显示当前的精确位置，用于在GUI上更新读数 [cite: 913]。
+
+> [cite_start]**对应《指南》**：这个“等待循环”是一个“耗时任务” [cite: 2728][cite_start]。在GUI程序中，这个循环**必须**在一个单独的 `threading` 线程中运行 [cite: 2728]，否则您的整个用户界面将会卡死。
+
+### 第五步：断开与清理 (程序的退出)
+
+当您的扫描任务完成或用户关闭程序时，必须安全地释放硬件。
+
+1.  [cite_start]**设置安全状态**：(推荐) 调用 `ANC_setTargetPosition` 将位移台移回“0”位或安全位置 [cite: 2734]。
+2.  **断开连接**：调用 `ANC_disconnect` 函数。
+3.  **释放句柄**：`ANC_disconnect` 会释放您在第一步中获得的 `ANC_Handle`，允许其他程序访问该设备。
+
+> [cite_start]**对应《指南》**：这个清理步骤应该放在一个 `finally` 块中 [cite: 2734]，以确保**无论程序是正常结束还是中途出错**，硬件连接都一定会被安全释放。
+
+---
+
+### 总结：代码的逻辑流程
+
+您的主程序（或扫描线程）的逻辑将是：
+
+1.  `__init__`： (自动) 加载DLL -> `ANC_discover` -> `ANC_connect` -> 获取 `ANC_Handle`。
+2.  `setup_scan`： 调用 `ANC_setAxisOutput(True)` -> `ANC_selectActuator` -> ...
+3.  `scan_loop`： (循环开始)
+    1.  计算下一个目标点 `pos`。
+    2.  调用 `ANC_setTargetPosition(pos)`。
+    3.  调用 `ANC_startAutoMove`。
+    4.  (进入等待循环) 反复调用 `ANC_getAxisStatus`，直到 `moving` 标志位变为 `False`。
+    5.  (移动完成) 调用其他仪器的代码（例如采谱）。
+    6.  保存数据，更新图表。
+    7.  (循环结束)
+4.  `cleanup` (在 `finally` 中)： 调用 `ANC_disconnect`。
+
+
+
+
+
+
+
+
+
+
+这是一个非常经典且专业的开发流程，我们称之为“离线开发，在线部署”。您分析得没错，这种方式下，**测试**就是一切。
+
+您需要将测试分为两个截然不同的阶段：
+
+1.  **离线开发与模拟测试** (在您没链接控制器的电脑上)
+2.  **在线集成与部署测试** (在实验室有控制器的电脑上)
+
+以下是您需要编写的程序步骤和相应的测试分析。
+
+-----
+
+### 阶段一：离线开发与模拟测试 (在您的开发电脑上)
+
+这个阶段的目标是：**假设硬件永远是好的**，把除了硬件通信之外的**所有代码** (GUI、扫描逻辑、数据处理、线程) 都写完并测试好。
+
+#### 步骤 1.1：打包流程测试 ("Hello World")
+
+在您编写任何复杂代码前，必须先验证“打包”这条路是通的。
+
+  * **编写什么**：一个最简单的“Hello World”程序，但要包含您最终会用到的所有**非标准库**。
+    ```python
+    # test_package.py
+    import tkinter as tk
+    import numpy as np
+    import matplotlib.pyplot as plt
+    # 甚至可以只 import ctypes
+
+    print("All libraries imported successfully.")
+
+    # 弹出一个窗口，证明GUI库工作正常
+    root = tk.Tk()
+    root.title("打包测试")
+    tk.Label(root, text="PyInstaller, Tkinter, NumPy, Matplotlib 工作正常!").pack()
+    root.mainloop()
+    ```
+  * **如何测试 (离线)**：
+    1.  [cite\_start]用 PyInstaller 打包这个脚本 [cite: 2698, 2741][cite\_start]：`pyinstaller --onefile --windowed test_package.py` [cite: 2741]。
+    2.  您会得到一个 `dist/test_package.exe` 文件。
+    3.  **关键测试**：将这个 `.exe` 文件 **拷贝到一个“干净”的电脑上** (或者您自己的电脑，但要先卸载Python)，然后运行它。
+  * **成功标准**：**一个GUI窗口必须成功弹出。** 如果失败，说明您的打包命令有问题，或者缺少了某些库的 `hook`。在这一步成功前，绝对不要进行下一步。
+
+#### 步骤 1.2：DLL 加载测试
+
+现在，我们测试最关键的外部依赖：`anc350v4.dll`。
+
+  * [cite\_start]**编写什么**：一个测试脚本，它只做一件事：用 `ctypes` 加载 `anc350v4.dll` [cite: 1497]。
+    ```python
+    # test_dll_load.py
+    import ctypes
+    import os
+
+    # 假设 .dll 放在 .exe 旁边
+    dll_path = os.path.join(os.path.dirname(__file__), 'anc350v4.dll')
+
+    try:
+        my_dll = ctypes.WinDLL(dll_path)
+        # 弹窗或打印，证明加载成功
+        print(f"成功加载 {dll_path}")
+    except Exception as e:
+        # 弹窗或打印，显示错误
+        print(f"加载 DLL 失败: {e}")
+    ```
+  * **如何测试 (离线)**：
+    1.  把 `anc350v4.dll` 文件复制到您的项目文件夹中。
+    2.  打包这个新脚本。
+    3.  **关键测试**：将 `.exe` 和 `anc350v4.dll` **两个文件** 一起拷贝到“干净”的电脑上（放在同一个文件夹里）。
+  * **成功标准**：程序运行后，**必须显示“成功加载”**，而不是“加载 DLL 失败”。如果失败，说明打包后的 `.exe` 找不到 `.dll`，或者 `.dll` 依赖了目标电脑上没有的其他系统文件。
+
+#### 步骤 1.3：编写“模拟模式”的控制器 (核心)
+
+[cite\_start]这是您**90%的编码工作**。您将完全按照《指南》的“数字孪生”思想 [cite: 2708] 和 `anc350res_8h.html` 的函数定义，编写您的 `ANC350Controller` 类，但要加入一个\*\*“模拟开关”\*\*。
+
+  * **编写什么**：一个 `ANC350Controller` 类，其 `__init__` 方法接受一个 `mock=True` 参数。
+
+      * **如果 `mock=True` (离线开发时)**：
+          * `__init__` (构造函数) **跳过**所有 `ANC_discover` 和 `ANC_connect` 调用，只是在内部打印 `[MOCK] 已连接`。
+          * `set_target_position(pos)`：不调用DLL，只是把 `pos` 存到
+            一个内部变量 `self.mock_position` 中，并打印 `[MOCK] 目标设为 {pos}`。
+          * `start_auto_move()`：不调用DLL，而是启动一个**模拟线程**，假装正在移动到 `self.mock_position`。
+          * `get_current_position()`：不调用DLL，而是直接返回 `self.mock_position` 的当前值。
+          * `get_axis_status()`：不调用DLL，而是根据模拟线程的状态，返回 `moving=True` 或 `moving=False`。
+      * **如果 `mock=False` (在线部署时)**：
+          * `__init__` 会**真实调用** `ANC_discover` 和 `ANC_connect`。
+          * 所有其他方法都会**真实调用** `ctypes` 封装的DLL函数。
+
+  * **如何测试 (离线)**：使用 `mock=True` 模式。
+
+  * **成功标准**：您能创建一个 `ANC350Controller(mock=True)` 实例，调用它的“移动”方法，然后能通过“获取位置”方法看到位置“真的”发生了变化。
+
+#### 步骤 1.4：编写完整的 GUI 和扫描逻辑
+
+现在您有了一个“假的但能用”的控制器，您可以编写和测试您的主程序了。
+
+  * **编写什么**：
+    1.  [cite\_start]**GUI 界面**：使用 Tkinter [cite: 2697][cite\_start]，画出所有输入框（起始、停止、步长）、按钮（开始、停止）和 Matplotlib 绘图画布 [cite: 2696, 2723]。
+    2.  [cite\_start]**扫描逻辑**：按照《指南》中 `start_scan_thread` 的逻辑 [cite: 2731]，编写您的扫描循环。这个循环将调用**模拟控制器** (`mock_controller`) 的方法。
+    3.  [cite\_start]**多线程**：**必须**使用 `threading` 模块 [cite: 2728][cite\_start]。当用户点击“开始”按钮时，启动一个**新线程**来运行扫描逻辑 [cite: 2728, 2731]。
+  * **如何测试 (离线)**：
+    1.  运行您的主程序 (在`mock=True`模式下)。
+    2.  点击“开始”按钮。
+  * **成功标准**：
+    1.  程序开始“扫描”，您能从日志或状态栏看到 `[MOCK]` 消息在滚动。
+    2.  [cite\_start]**最关键的测试**：在“扫描”期间，**您的GUI窗口绝不能卡死** [cite: 2728]。您必须仍然能够拖动窗口、点击（尚未实现的）“停止”按钮。
+    3.  Matplotlib 图表上能实时绘制出“模拟”的数据。
+
+-----
+
+### 阶段二：在线集成与部署测试 (在实验室的电脑上)
+
+这个阶段的目标是：**最小化地修改代码**，将“模拟模式”切换为“真实模式”，并验证硬件交互。
+
+#### 步骤 2.1：准备目标电脑 (一次性)
+
+1.  [cite\_start]**安装硬件驱动**：这是您必须做的。**您的 `.exe` 无法替代 attocube 的官方驱动程序** [cite: 589, 599, 1424][cite\_start]。确保在 Windows 设备管理器中能看到 ANC350 [cite: 601]。
+2.  **创建部署文件夹**：例如 `D:\ANC350_Control`。
+
+#### 步骤 2.2：最终打包与部署
+
+1.  **编写什么 (离线)**：在您的开发电脑上，打开主程序。找到创建控制器实例的那一行，将 `mock=True` 改为 `mock=False`。
+    ```python
+    # 从:
+    # controller = ANC350Controller(mock=True)
+    # 改为:
+    controller = ANC350Controller(mock=False)
+    ```
+2.  **打包 (离线)**：重新打包您**完整**的应用程序 (`pyinstaller --onefile --windowed main_app.py`)。
+3.  **部署 (在线)**：将**两个文件**拷贝到实验室电脑的 `D:\ANC350_Control` 文件夹中：
+      * `main_app.exe` (您打包的程序)
+      * `anc350v4.dll` (必须的DLL文件)
+
+#### 步骤 2.3：分级“冒烟测试” (在线)
+
+这是您第一次在真实硬件上运行。**不要**一上来就点“开始扫描”。
+
+  * **测试 1：连接测试**
+
+      * **操作**：双击运行 `main_app.exe`。
+      * **成功标准**：程序**没有在启动时崩溃**。这证明 `ANC_discover` 和 `ANC_connect` 调用成功了。您的GUI状态栏应该显示“已连接”。
+      * *失败分析*：如果启动时崩溃，说明 `ANC_discover` 或 `ANC_connect` 失败。原因：硬件驱动没装好、USB线没插、或者DLL版本不对。
+
+  * **测试 2：开环/小范围移动测试**
+
+      * **操作**：(假设您的GUI上有这些功能) 点击“使能轴输出”，然后点击“单步移动(Fwd)”。
+      * **成功标准**：**您能听到位移台发出“咔”的一声，或者物理上看到微小移动。**
+      * *失败分析*：如果没反应，检查 `ANC_setAxisOutput` 是否成功调用。
+
+  * **测试 3：闭环读数测试**
+
+      * [cite\_start]**操作**：(假设您的GUI上有读数) 查看“当前位置” [cite: 219, 913]。
+      * [cite\_start]**成功标准**：**GUI上显示一个真实的、非零的物理位置** (例如 "13091.823um") [cite: 206]。
+      * *失败分析*：如果读数为0或-INF，说明 `ANC_getPosition` 调用失败或传感器未连接。
+
+#### 步骤 2.4：全流程扫描测试 (在线)
+
+  * **操作**：输入一个**非常小范围**的扫描（例如，从10µm到20µm，步长1µm）。点击“开始扫描”。
+  * **成功标准**：
+    1.  位移台移动到第一个点 (10µm)。
+    2.  `ANC_getAxisStatus` 返回 `moving=False`，扫描线程被唤醒。
+    3.  程序（假装）采集数据。
+    4.  位移台移动到第二个点 (11µm)。
+    5.  ...循环往复，直到扫描结束。
+    6.  **整个过程中，GUI界面始终流畅。**
+
+如果这个测试成功了，那么恭喜您，您的项目已经100%完成了。
+
+
+
+
+是的，您提供的信息确实包含了网络控制的部分，并且您的想法——先搜索、再确认连接方式、然后控制——是完全可行且正确的，这正是DLL API所支持的工作流程。
+
+让我们来分析一下您提供的信息是如何支持这一点的：
+
+网络控制是支持的:
+
+
+硬件手册 (PDF)：明确提到了ANC350后面板上有一个**(可选的)以太网端口** 。手册还提到了可以通过DAISY软件配置IP地址、子网掩码和网关 ，这都证明了网络控制是设备的一个功能。
+
+
+
+
+
+DLL API 文档 (anc350res_8h.html)：
+
+ANC_discover 函数的说明提到它可以搜索 "USB and LAN" 上的设备。
+
+ANC_discover 函数接受一个 ANC_InterfaceType 参数，您可以指定搜索 IfTcp (仅网络)、IfUsb (仅USB) 或 IfAll (所有接口)。这明确表明DLL支持发现网络设备。
+
+还有一个 ANC_registerExternalIp 函数，用于手动注册不在同一子网中的网络设备，进一步证明了网络控制能力。
+
+可以搜索并识别连接方式:
+
+工作流程: 您应该先调用 ANC_discover(IfAll, ...) 来查找所有连接的设备。
+
+识别: 找到设备后（假设发现了 N 台），您可以循环调用 ANC_getDeviceInfo(devNo, ...) 函数（devNo 从 0 到 N-1）。
+
+关键信息: ANC_getDeviceInfo 函数会返回一个 address 参数。根据文档说明，这个参数会返回：
+
+设备的IP地址字符串（例如 "192.168.1.100"），如果它是通过网络连接的。
+
+字符串 "USB"，如果它是通过USB连接的。
+
+确认: 通过检查返回的 address 字符串，您的程序就可以在调用 ANC_connect 之前准确地知道这台设备是用哪种方式连接的。
+
+连接与控制:
+
+一旦您通过 ANC_getDeviceInfo 确认了您想要控制的设备（无论是通过序列号、ID还是连接方式识别），您就使用它的设备编号 (devNo) 调用 ANC_connect。
+
+DLL库会在内部处理是建立USB通信还是TCP/IP通信。您后续调用 ANC_setTargetPosition, ANC_getPosition 等函数时，使用的方法是完全一样的，无需关心底层是USB还是网络。
+
+总结:
+
+您完全可以按照您的想法来做：
+
+使用 ANC_discover 搜索所有连接的ANC350控制器。
+
+遍历搜索结果，使用 ANC_getDeviceInfo 获取每台设备的详细信息，特别是通过 address 字段判断它是通过网络 (IP 地址) 还是 USB ("USB" 字符串) 连接的。
+
+根据您的需要（例如，匹配特定的IP地址或仅仅是找到第一个网络设备），选择正确的设备编号 devNo。
+
+使用这个 devNo 调用 ANC_connect 来建立连接。
+
+之后使用返回的 ANC_Handle 进行控制，无需再区分USB或网络。
