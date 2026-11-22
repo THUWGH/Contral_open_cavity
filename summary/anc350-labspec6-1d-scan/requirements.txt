@@ -1,0 +1,3 @@
+# Versions verified with Python 3.12 on Windows.
+numpy==1.26.4
+matplotlib==3.8.4
